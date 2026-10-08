@@ -1,0 +1,7 @@
+# Arquivos lidos pelo cmd.exe, WScript e PowerShell precisam de CRLF no Windows,
+# tanto num clone (qualquer core.autocrlf) quanto no "Download ZIP" do GitHub.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.ps1 text eol=crlf
+*.md  text

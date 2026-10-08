@@ -8,6 +8,34 @@ Pasta: `D:\dev\MiddleClick-CtrlF4`
 
 ---
 
+## Instalação (em qualquer computador)
+
+**Sem Git:**
+
+1. No GitHub, clique em **Code → Download ZIP**.
+2. Extraia o ZIP numa pasta **definitiva** (ex.: `C:\Ferramentas\MiddleClick-CtrlF4`) —
+   o atalho de inicialização aponta para ela, então não a mova nem apague depois.
+3. Dê **duplo clique em `Instalar.cmd`** e responda **S** ou **N** à pergunta
+   "Iniciar automaticamente com o Windows?".
+
+Pronto: o remapeamento já fica ligado. O `Instalar.cmd` desbloqueia os arquivos baixados,
+para uma versão antiga que esteja rodando, cria (S) ou remove (N) o atalho na pasta
+Inicializar e liga o remapeamento. Rode-o de novo para **atualizar** (depois de extrair
+uma versão nova por cima) ou para **mudar a resposta**.
+
+**Ou, com Git**, no lugar dos passos 1 e 2:
+
+```powershell
+git clone https://github.com/jusgador/MiddleClick-CtrlF4.git C:\Ferramentas\MiddleClick-CtrlF4
+```
+
+e depois o passo 3 (`Instalar.cmd`) do mesmo jeito. Para atualizar um clone: `git pull` na
+pasta e rode o `Instalar.cmd` de novo (ele para a versão antiga e liga a nova).
+
+Para desinstalar: rode `Instalar.cmd` respondendo **N**, depois `Parar-Remap.cmd`, e apague a pasta.
+
+---
+
 ## O que faz
 
 - O **clique do botão do meio** do mouse (`WM_MBUTTONDOWN` / `WM_MBUTTONUP` /
@@ -230,6 +258,7 @@ pelo VBS). Use `Parar-Remap.cmd` primeiro.
 
 | Arquivo | Papel |
 |---|---|
+| `Instalar.cmd` | Instalação em um passo: pergunta sobre iniciar com o Windows e liga o remapeamento. |
 | `Remap-MiddleClickToCtrlF4.ps1` | O remapeamento em si (hook + envio do atalho). |
 | `Iniciar-Remap.vbs` | Lança o `.ps1` sem janela de console. |
 | `Parar-Remap.cmd` | Encerra o processo do remapeamento. |
