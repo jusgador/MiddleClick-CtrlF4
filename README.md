@@ -14,11 +14,15 @@ Pasta: `D:\dev\MiddleClick-CtrlF4`
   `WM_MBUTTONDBLCLK`) é suprimido e substituído pelo atalho **CTRL+F4**.
 - É **global** por padrão — vale em todos os programas.
 - Por padrão o `CTRL+F4` é enviado no evento *down* (quando o botão desce).
+- **Acelera a rolagem da roda** (vertical): girando devagar, cada degrau rola o normal
+  (as "linhas por vez" do Windows); girando continuamente, a rolagem vai sendo
+  multiplicada — 2x, 3x… até 5x por padrão. Ver [Aceleração da rolagem](#aceleração-da-rolagem).
 
 ## O que **não** faz
 
-- **Não mexe na rolagem.** O disco da roda (`WM_MOUSEWHEEL`, `0x020A`) passa direto
-  pelo hook, intocado. Rolagem vertical, horizontal e rolagem com teclas seguem normais.
+- **Não segura nem atrasa a rolagem.** Cada evento original da roda passa na hora,
+  intacto; a aceleração só *acrescenta* um evento extra.
+- **Não mexe na rolagem horizontal** (`WM_MOUSEHWHEEL`) nem na rolagem com teclas.
 - **Não mexe nos botões esquerdo/direito nem nos botões laterais** (`XBUTTON`).
 
 ## Requisitos
@@ -99,6 +103,40 @@ então rodar de novo não faz nada em vez de empilhar hooks.
 | `-NoSwallow` | Diagnóstico: envia o `CTRL+F4` **e** deixa o clique do meio passar. |
 | `-HoldMilliseconds <n>` | Pausa entre apertar e soltar o `CTRL+F4`. Padrão `0`. Use 30–50 só se algum programa perder o atalho. |
 | `-MaxSeconds <n>` | Encerra sozinho depois de `n` segundos (padrão `0` = fica até você parar). Serve para remapear só por um tempo, e é o que os testes usam para exercitar o encerramento limpo. |
+| `-NoScrollAccel` | Desliga a aceleração da rolagem (a roda volta a passar 100% intocada). |
+| `-ScrollFastMs <n>` | Intervalo máximo (ms) entre dois degraus no mesmo sentido para contar como "giro contínuo". Padrão `80`. |
+| `-ScrollRampNotches <n>` | Quantos degraus rápidos seguidos sobem o fator em +1. Padrão `2`. |
+| `-ScrollMaxFactor <n>` | Fator máximo da aceleração. Padrão `5` (`1` = sem aceleração). |
+| `-ScrollAccelInjected` | Diagnóstico/teste: acelera também rolagem **injetada** por outros programas (ver abaixo). |
+
+### Aceleração da rolagem
+
+A cada degrau da roda o hook olha quanto tempo passou desde o degrau anterior:
+
+- **Mais de `ScrollFastMs` (80 ms)**, ou mudou o sentido → giro lento: fator 1x, nada
+  é acrescentado. A sequência rápida zera.
+- **Até `ScrollFastMs`** → giro contínuo: a sequência rápida cresce, e o fator é
+  `1 + sequência / ScrollRampNotches`, limitado a `ScrollMaxFactor`.
+
+Com os padrões: os 2 primeiros degraus rápidos rolam normal, depois 2x, 3x, 4x e, a
+partir do 8º degrau seguido, 5x. Quando o fator passa de 1, o hook deixa o evento
+original seguir e injeta (no `ThreadPool`, fora do callback) um evento extra com
+`delta × (fator − 1)`. O extra leva uma marca no `dwExtraInfo`, e o hook ignora o que
+tem essa marca, para não acelerar o próprio extra em loop.
+
+A velocidade "lenta" é a do Windows: **Configurações → Bluetooth e dispositivos →
+Mouse → Linhas para rolar por vez**. Deixe esse valor baixo (1–3) e a aceleração cuida
+do resto.
+
+**Rolagem injetada é ignorada por padrão.** Softwares de mouse (Logitech Options+, rolagem
+suave etc.) às vezes injetam muitos eventos pequenos; acelerá-los multiplicaria a rolagem
+de um jeito imprevisível. Só a roda física é acelerada, a menos que você passe
+`-ScrollAccelInjected`.
+
+**Para ajustar no dia a dia** (o `Iniciar-Remap.vbs` sobe o script sem argumentos):
+mude os valores padrão dos parâmetros `ScrollFastMs`, `ScrollRampNotches` e
+`ScrollMaxFactor` no bloco `param(...)` do `Remap-MiddleClickToCtrlF4.ps1` e reinicie
+(`Parar-Remap.cmd` e depois `Iniciar-Remap.vbs`).
 
 ### Restringir a um programa específico (opcional)
 
@@ -125,7 +163,7 @@ direta e esperada de remapear o clique:
 
 1. **Autoscroll não funciona mais.** A "cruzinha" de rolagem do Windows/Chrome é
    disparada pelo *clique* do meio, que agora é suprimido. A **rolagem em si continua
-   intacta** — é outra mensagem do Windows (`WM_MOUSEWHEEL`).
+   funcionando** (e acelerada) — é outra mensagem do Windows (`WM_MOUSEWHEEL`).
 2. **Navegadores:** "abrir link em nova aba" com o botão do meio para de funcionar, e
    o `CTRL+F4` que entra no lugar **fecha a aba atual**.
 3. **Arrastar com o botão do meio** (alguns programas) deixa de funcionar.
@@ -143,13 +181,14 @@ direta e esperada de remapear o clique:
 ## Testes
 
 `Test-Remap.ps1` verifica a cadeia inteira **sem você precisar clicar em nada**. Ele sobe
-o remapeamento num processo separado, injeta input sintético e confere cinco coisas:
+o remapeamento num processo separado, injeta input sintético e confere seis coisas:
 
 1. o clique do meio **não** chega na janela de teste — foi suprimido;
 2. o `CTRL+F4` **chega** na janela de teste — o atalho foi enviado;
-3. a **rolagem continua chegando** — o hook não encosta em `WM_MOUSEWHEEL`;
-4. o botão **esquerdo continua chegando** — os outros botões ficam intactos;
-5. o encerramento por `-MaxSeconds` **desinstala o hook** e o processo sai sozinho,
+3. a **rolagem lenta chega intacta** (3 degraus espaçados = 3 × 120, sem extra);
+4. a **rolagem rápida chega ampliada** (10 degraus seguidos somam mais que 1200);
+5. o botão **esquerdo continua chegando** — os outros botões ficam intactos;
+6. o encerramento por `-MaxSeconds` **desinstala o hook** e o processo sai sozinho,
    inclusive recuperando o mutex quando a instância anterior morreu à força.
 
 Ele avisa antes de começar (o botão do meio fica remapeado por uns 15 segundos e o cursor

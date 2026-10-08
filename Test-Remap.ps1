@@ -5,13 +5,14 @@
 
 .DESCRIPTION
     Sobe o Remap-MiddleClickToCtrlF4.ps1 num processo separado, injeta input
-    sintetico (mouse_event) e confere cinco coisas:
+    sintetico (mouse_event) e confere seis coisas:
 
       1. O clique do meio NAO chega na janela de teste  -> foi suprimido.
       2. O CTRL+F4 CHEGA na janela de teste              -> o atalho foi enviado.
-      3. A rolagem CHEGA na janela de teste              -> o hook nao toca WM_MOUSEWHEEL.
-      4. O botao esquerdo CHEGA na janela de teste       -> outros botoes intactos.
-      5. O encerramento por -MaxSeconds desinstala o hook e o processo sai sozinho.
+      3. A rolagem lenta CHEGA intacta (delta 120 cada)  -> girar devagar nao acelera.
+      4. A rolagem rapida chega AMPLIADA                 -> girar continuamente acelera.
+      5. O botao esquerdo CHEGA na janela de teste       -> outros botoes intactos.
+      6. O encerramento por -MaxSeconds desinstala o hook e o processo sai sozinho.
 
     A janela de teste e' um form vazio: nada nela pode ser fechado ou alterado sem
     querer. O cursor do mouse e' movido durante o teste e restaurado no final.
@@ -169,9 +170,11 @@ try {
     # =======================================================================
     # PARTE 1 - a cadeia completa
     # =======================================================================
-    Write-Host '  [1/2] Cadeia completa (suprimir o meio + enviar CTRL+F4 + rolagem intacta)' -ForegroundColor Cyan
+    Write-Host '  [1/2] Cadeia completa (suprimir o meio + enviar CTRL+F4 + aceleracao da rolagem)' -ForegroundColor Cyan
 
-    $remap = Iniciar-Remap @('-LogFile', $logCadeia)
+    # -ScrollAccelInjected: o input do teste e' injetado (mouse_event), e por padrao
+    # o remapeamento nao acelera rolagem injetada.
+    $remap = Iniciar-Remap @('-LogFile', $logCadeia, '-ScrollAccelInjected')
     [void]$processos.Add($remap)
     Write-Host ("        remapeamento subiu como PID " + $remap.Id) -ForegroundColor DarkGray
 
@@ -213,6 +216,7 @@ try {
         $script:form        = $form
         $script:passo       = 0
         $script:injetado    = $false
+        $script:rajada      = $false
         $script:comFoco     = $false
         $script:tentativas  = 0
         $script:esperaFinal = 0
@@ -260,9 +264,12 @@ try {
                     [RemapTeste.Win32]::mouse_event($script:MOUSEEVENTF_MIDDLEUP, 0, 0, 0, [System.UIntPtr]::Zero)
                     Start-Sleep -Milliseconds 400
 
-                    # 4) A rolagem: deve continuar passando.
-                    [RemapTeste.Win32]::mouse_event($script:MOUSEEVENTF_WHEEL, 0, 0, 120, [System.UIntPtr]::Zero)
-                    Start-Sleep -Milliseconds 250
+                    # 4) Rolagem LENTA (degraus espacados): deve passar intacta,
+                    #    sem nenhum evento extra de aceleracao.
+                    for ($i = 0; $i -lt 3; $i++) {
+                        [RemapTeste.Win32]::mouse_event($script:MOUSEEVENTF_WHEEL, 0, 0, 120, [System.UIntPtr]::Zero)
+                        Start-Sleep -Milliseconds 250
+                    }
 
                     # 5) O botao esquerdo: deve continuar passando.
                     [RemapTeste.Win32]::mouse_event($script:MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [System.UIntPtr]::Zero)
@@ -273,7 +280,19 @@ try {
                     return
                 }
 
-                # 6) Deixa os eventos assentarem e fecha.
+                # 6) Rolagem RAPIDA (giro continuo), num tick separado para que os
+                #    eventos da fase lenta ja tenham sido entregues antes do marco.
+                if (-not $script:rajada) {
+                    $script:eventos.Add('MARCO RAJADA')
+                    for ($i = 0; $i -lt 10; $i++) {
+                        [RemapTeste.Win32]::mouse_event($script:MOUSEEVENTF_WHEEL, 0, 0, 120, [System.UIntPtr]::Zero)
+                        Start-Sleep -Milliseconds 15
+                    }
+                    $script:rajada = $true
+                    return
+                }
+
+                # 7) Deixa os eventos assentarem e fecha.
                 $script:esperaFinal++
                 if ($script:esperaFinal -ge 4) {
                     $script:timer.Stop()
@@ -318,12 +337,32 @@ try {
             [void]$averbacoes.Add('Nao consegui dar foco a janela de teste, entao a entrega do CTRL+F4 ficou inconclusiva.')
         }
 
-        # 3. A rolagem continuou passando?
-        if ($texto -match 'WHEEL delta=120') {
-            Write-Host '        OK: a rolagem continuou chegando na janela (intacta)' -ForegroundColor Green
+        # 3 e 4. Rolagem lenta intacta, rolagem rapida ampliada.
+        $antes  = New-Object 'System.Collections.Generic.List[int]'
+        $depois = New-Object 'System.Collections.Generic.List[int]'
+        $alvoLista = $antes
+        foreach ($ev in $script:eventos) {
+            if ($ev -eq 'MARCO RAJADA') { $alvoLista = $depois; continue }
+            if ($ev -match '^WHEEL delta=(-?\d+)$') { $alvoLista.Add([int]$Matches[1]) }
+        }
+
+        $somaLenta = 0; foreach ($d in $antes) { $somaLenta += $d }
+        if ($antes.Count -eq 3 -and $somaLenta -eq 360) {
+            Write-Host '        OK: a rolagem lenta chegou intacta (3 degraus, delta 120 cada, sem extra)' -ForegroundColor Green
+        }
+        elseif ($antes.Count -eq 0) {
+            [void]$falhas.Add('A rolagem NAO chegou na janela de teste: o hook pode estar engolindo WM_MOUSEWHEEL.')
         }
         else {
-            [void]$falhas.Add('A rolagem NAO chegou na janela de teste: o hook pode estar engolindo WM_MOUSEWHEEL.')
+            [void]$falhas.Add('A rolagem lenta nao chegou intacta (esperado 3 x 120; chegou: ' + ($antes -join ', ') + ').')
+        }
+
+        $somaRapida = 0; foreach ($d in $depois) { $somaRapida += $d }
+        if ($somaRapida -gt 1200) {
+            Write-Host ('        OK: a rolagem rapida chegou ampliada (10 degraus = 1200 viraram ' + $somaRapida + ')') -ForegroundColor Green
+        }
+        else {
+            [void]$falhas.Add('A rolagem rapida NAO foi acelerada (10 degraus somaram ' + $somaRapida + '; esperado mais que 1200).')
         }
 
         # 4. O botao esquerdo continuou passando?

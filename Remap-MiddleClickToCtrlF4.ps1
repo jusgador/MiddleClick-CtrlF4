@@ -9,10 +9,13 @@
 
     Comportamento:
       - O CLIQUE do botao do meio (WM_MBUTTONDOWN / WM_MBUTTONUP / WM_MBUTTONDBLCLK)
-        e' suprimido e substituido por CTRL+F4.
-      - A ROLAGEM continua intacta: WM_MOUSEWHEEL (0x020A) nunca e' tocada, passa
-        direto pelo CallNextHookEx. O "autoscroll" (a cruzinha que aparece ao apertar
-        a roda) e' disparado pelo CLIQUE, entao ele sai de cena junto.
+        e' suprimido e substituido por CTRL+F4. O "autoscroll" (a cruzinha que aparece
+        ao apertar a roda) e' disparado pelo CLIQUE, entao ele sai de cena junto.
+      - A ROLAGEM vertical (WM_MOUSEWHEEL, 0x020A) ganha ACELERACAO: o evento original
+        sempre passa intacto e na hora; quando os degraus da roda chegam em sequencia
+        rapida (girando continuamente), o script injeta um evento EXTRA com a diferenca
+        (fator 2x, 3x... ate o maximo). Girando devagar, nada muda. Desligue com
+        -NoScrollAccel. A rolagem horizontal (WM_MOUSEHWHEEL) nao e' tocada.
       - Botoes esquerdo/direito e botoes laterais (XBUTTON) nao sao afetados.
 
     Detalhe de implementacao importante: o SendInput NAO e' chamado dentro do callback
@@ -49,9 +52,32 @@
     Util para remapear so por um tempo, e usado pelos testes para exercitar
     o encerramento limpo (unhook) de forma automatizada.
 
+.PARAMETER NoScrollAccel
+    Desliga a aceleracao da rolagem (a roda volta a passar 100% intocada).
+
+.PARAMETER ScrollFastMs
+    Intervalo maximo, em ms, entre dois degraus da roda (no mesmo sentido) para
+    contarem como "giro continuo". Padrao 80. Maior = acelera com giros mais lentos.
+
+.PARAMETER ScrollRampNotches
+    Quantos degraus rapidos seguidos sobem o fator em +1. Padrao 2.
+    Menor = acelera mais cedo; maior = acelera mais aos poucos.
+
+.PARAMETER ScrollMaxFactor
+    Fator maximo da aceleracao (1 = sem aceleracao). Padrao 5.
+
+.PARAMETER ScrollAccelInjected
+    Diagnostico/teste: acelera tambem rolagens INJETADAS por outros programas. Por
+    padrao elas sao ignoradas, para nao multiplicar a rolagem suave de softwares de
+    mouse (Logitech etc.) que injetam muitos eventos pequenos. Os testes usam isto.
+
 .EXAMPLE
     .\Remap-MiddleClickToCtrlF4.ps1
     Remapeamento global, em primeiro plano. Pare com Ctrl+C.
+
+.EXAMPLE
+    .\Remap-MiddleClickToCtrlF4.ps1 -ScrollMaxFactor 8 -ScrollRampNotches 1
+    Aceleracao mais agressiva da rolagem.
 
 .EXAMPLE
     .\Remap-MiddleClickToCtrlF4.ps1 -OnlyProcess pje1g
@@ -80,7 +106,20 @@ param(
 
     [int]$HoldMilliseconds = 0,
 
-    [int]$MaxSeconds = 0
+    [int]$MaxSeconds = 0,
+
+    [switch]$NoScrollAccel,
+
+    [ValidateRange(1, 1000)]
+    [int]$ScrollFastMs = 80,
+
+    [ValidateRange(1, 100)]
+    [int]$ScrollRampNotches = 2,
+
+    [ValidateRange(1, 50)]
+    [int]$ScrollMaxFactor = 5,
+
+    [switch]$ScrollAccelInjected
 )
 
 Set-StrictMode -Version 2.0
@@ -126,6 +165,15 @@ public static class MiddleClickRemap
     private const int WM_MBUTTONDOWN    = 0x0207;
     private const int WM_MBUTTONUP      = 0x0208;
     private const int WM_MBUTTONDBLCLK  = 0x0209;
+    private const int WM_MOUSEWHEEL     = 0x020A;
+
+    private const uint LLMHF_INJECTED   = 0x00000001;
+    private const uint INPUT_MOUSE      = 0;
+    private const uint MOUSEEVENTF_WHEEL = 0x0800;
+
+    // Marca gravada no dwExtraInfo da rolagem extra que nos mesmos injetamos,
+    // para o hook reconhece-la e nao acelera-la de novo (loop).
+    private static readonly IntPtr MARCA_ROLAGEM_PROPRIA = new IntPtr(0x4D435743);   // "MCWC"
 
     private const uint WM_QUIT     = 0x0012;
     private const uint PM_NOREMOVE = 0x0000;
@@ -273,10 +321,23 @@ public static class MiddleClickRemap
     private static bool _triggerOnDown = true;
     private static int _holdMs;
 
+    private static bool _rolagemAcelerada;
+    private static uint _rolagemRapidaMs;
+    private static int _rolagemDegrausPorPasso;
+    private static int _rolagemFatorMaximo;
+    private static bool _rolagemAceleraInjetada;
+
+    // Estado da aceleracao: so e' tocado pela thread do hook.
+    private static bool _temRodaAnterior;
+    private static uint _ultimoTempoRoda;
+    private static int _ultimoSinalRoda;
+    private static int _sequenciaRapida;
+
     private static StreamWriter _log;
 
     private static long _cliquesSuprimidos;
     private static long _ctrlF4Enviados;
+    private static long _rolagensAceleradas;
 
     private static int _ultimoPid;
     private static bool _ultimoPidCasa;
@@ -291,9 +352,25 @@ public static class MiddleClickRemap
         get { return Interlocked.Read(ref _ctrlF4Enviados); }
     }
 
+    public static long WheelEventsAccelerated
+    {
+        get { return Interlocked.Read(ref _rolagensAceleradas); }
+    }
+
     // -------------------------------------------------------------------
     // API publica
     // -------------------------------------------------------------------
+    public static void ConfigureScrollAccel(bool enabled, int fastMs, int rampNotches, int maxFactor, bool accelerateInjected)
+    {
+        _rolagemAcelerada = enabled && maxFactor > 1;
+        _rolagemRapidaMs = (uint)(fastMs < 1 ? 1 : fastMs);
+        _rolagemDegrausPorPasso = rampNotches < 1 ? 1 : rampNotches;
+        _rolagemFatorMaximo = maxFactor < 1 ? 1 : maxFactor;
+        _rolagemAceleraInjetada = accelerateInjected;
+        _temRodaAnterior = false;
+        _sequenciaRapida = 0;
+    }
+
     public static void Start(string logFile, bool dryRun, bool swallow, string onlyProcess, string triggerOn, int holdMilliseconds)
     {
         if (_running)
@@ -320,6 +397,7 @@ public static class MiddleClickRemap
         _installError = null;
         _cliquesSuprimidos = 0;
         _ctrlF4Enviados = 0;
+        _rolagensAceleradas = 0;
 
         _running = true;
         _thread = new Thread(ThreadMain);
@@ -400,6 +478,11 @@ public static class MiddleClickRemap
             }
 
             Log("hook WH_MOUSE_LL instalado (thread " + _threadId.ToString() + ").");
+            Log(_rolagemAcelerada
+                ? "aceleracao da rolagem: ligada (" + _rolagemRapidaMs.ToString() + " ms, +1x a cada " +
+                  _rolagemDegrausPorPasso.ToString() + " degraus, maximo " + _rolagemFatorMaximo.ToString() + "x" +
+                  (_rolagemAceleraInjetada ? ", inclusive rolagem injetada" : "") + ")."
+                : "aceleracao da rolagem: desligada.");
             _ready.Set();
 
             MSG msg;
@@ -447,6 +530,17 @@ public static class MiddleClickRemap
         {
             int mensagem = wParam.ToInt32();
 
+            // Rolagem: o evento original SEMPRE segue intacto e sem atraso; no
+            // maximo agendamos um evento extra para acelerar.
+            if (mensagem == WM_MOUSEWHEEL)
+            {
+                if (_rolagemAcelerada)
+                {
+                    TratarRoda(lParam);
+                }
+                return CallNextHookEx(_hook, nCode, wParam, lParam);
+            }
+
             bool ehDown = (mensagem == WM_MBUTTONDOWN) || (mensagem == WM_MBUTTONDBLCLK);
             bool ehUp = (mensagem == WM_MBUTTONUP);
 
@@ -489,6 +583,76 @@ public static class MiddleClickRemap
         {
             try { Log("erro no callback do hook: " + ex.Message); } catch { }
             return CallNextHookEx(_hook, nCode, wParam, lParam);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Aceleracao da rolagem. Roda dentro do callback: so contas, nada de I/O.
+    // -------------------------------------------------------------------
+    private static void TratarRoda(IntPtr lParam)
+    {
+        MSLLHOOKSTRUCT dados = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+
+        // A rolagem extra que nos mesmos injetamos: deixa passar sem contar.
+        if (dados.dwExtraInfo == MARCA_ROLAGEM_PROPRIA) return;
+
+        // Rolagem injetada por outro programa (ex.: rolagem suave de software de
+        // mouse): por padrao nao mexemos.
+        if ((dados.flags & LLMHF_INJECTED) != 0 && !_rolagemAceleraInjetada) return;
+
+        int delta = unchecked((short)(dados.mouseData >> 16));
+        if (delta == 0) return;
+
+        int sinal = delta > 0 ? 1 : -1;
+        uint agora = dados.time != 0 ? dados.time : unchecked((uint)Environment.TickCount);
+
+        bool rapido = false;
+        if (_temRodaAnterior && sinal == _ultimoSinalRoda)
+        {
+            uint intervalo = unchecked(agora - _ultimoTempoRoda);   // sobrevive ao wrap do tick
+            rapido = intervalo <= _rolagemRapidaMs;
+        }
+
+        _temRodaAnterior = true;
+        _ultimoTempoRoda = agora;
+        _ultimoSinalRoda = sinal;
+
+        int teto = _rolagemFatorMaximo * _rolagemDegrausPorPasso;
+        _sequenciaRapida = rapido ? Math.Min(_sequenciaRapida + 1, teto) : 0;
+
+        int fator = Math.Min(1 + _sequenciaRapida / _rolagemDegrausPorPasso, _rolagemFatorMaximo);
+        if (fator <= 1) return;
+
+        // O delta da roda e' um short: limita o extra para nao estourar.
+        int extra = delta * (fator - 1);
+        if (extra > 30000) extra = 30000;
+        if (extra < -30000) extra = -30000;
+
+        Interlocked.Increment(ref _rolagensAceleradas);
+        ThreadPool.QueueUserWorkItem(RolagemWorker, new int[] { extra, fator });
+    }
+
+    // Roda no ThreadPool: fora do callback do hook.
+    private static void RolagemWorker(object state)
+    {
+        try
+        {
+            int[] dados = (int[])state;
+            int extra = dados[0];
+
+            INPUT[] entrada = new INPUT[1];
+            entrada[0].type = INPUT_MOUSE;
+            entrada[0].u.mi.mouseData = unchecked((uint)extra);
+            entrada[0].u.mi.dwFlags = MOUSEEVENTF_WHEEL;
+            entrada[0].u.mi.dwExtraInfo = MARCA_ROLAGEM_PROPRIA;
+
+            uint enviados = SendInput(1, entrada, Marshal.SizeOf(typeof(INPUT)));
+            Log("rolagem acelerada: fator " + dados[1].ToString() + ", extra " + extra.ToString() +
+                " (SendInput " + enviados.ToString() + "/1).");
+        }
+        catch (Exception ex)
+        {
+            Log("falha ao enviar a rolagem extra: " + ex.Message);
         }
     }
 
@@ -611,6 +775,14 @@ if ($DryRun.IsPresent) { $sufixo += ' [DRY-RUN: nao envia o atalho]' }
 if ($NoSwallow.IsPresent) { $sufixo += ' [NoSwallow: o clique do meio tambem passa]' }
 
 try {
+    [MiddleClickRemap]::ConfigureScrollAccel(
+        (-not $NoScrollAccel.IsPresent),
+        $ScrollFastMs,
+        $ScrollRampNotches,
+        $ScrollMaxFactor,
+        $ScrollAccelInjected.IsPresent
+    )
+
     [MiddleClickRemap]::Start(
         $logPath,
         $DryRun.IsPresent,
@@ -628,7 +800,13 @@ try {
     else {
         Write-Host '  Escopo: GLOBAL (todos os programas). Use -OnlyProcess <nome.exe> para restringir.' -ForegroundColor Green
     }
-    Write-Host '  A rolagem (roda) continua funcionando normalmente.' -ForegroundColor DarkGray
+    if ($NoScrollAccel.IsPresent -or $ScrollMaxFactor -le 1) {
+        Write-Host '  Rolagem (roda): intocada, sem aceleracao.' -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host ("  Rolagem (roda): aceleracao ativa (degraus a ate " + $ScrollFastMs + " ms = giro continuo; +1x a cada " +
+            $ScrollRampNotches + " degraus; maximo " + $ScrollMaxFactor + "x).") -ForegroundColor DarkGray
+    }
     if ($logPath) {
         Write-Host ("  Log: " + $logPath) -ForegroundColor DarkGray
     }
