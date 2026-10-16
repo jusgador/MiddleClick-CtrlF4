@@ -49,7 +49,7 @@ rem 2) Desbloqueia os arquivos baixados (evita aviso de seguranca do Windows).
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -LiteralPath $env:PASTA -Recurse -File | Unblock-File"
 
 rem 3) Para uma instancia antiga, se houver (para carregar a versao nova).
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and $_.CommandLine -like '*Remap-MiddleClickToCtrlF4.ps1*' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$alvos = @(Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'powershell.exe' -or $_.Name -eq 'pwsh.exe') -and $_.CommandLine -like '*Remap-MiddleClickToCtrlF4.ps1*' -and $_.ProcessId -ne $PID }); if ($alvos.Count -gt 0) { try { $e = [System.Threading.EventWaitHandle]::OpenExisting('Local\MiddleClick-CtrlF4-Parar'); [void]$e.Set(); $e.Dispose() } catch { }; foreach ($p in $alvos) { $proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue; if ($proc -and -not $proc.WaitForExit(6000)) { Stop-Process -Id $p.ProcessId -Force } } }"
 
 if "%AUTO%"=="N" goto semAuto
 

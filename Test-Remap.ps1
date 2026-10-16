@@ -139,7 +139,9 @@ function Esperar-Log {
 
 function Iniciar-Remap {
     param([string[]]$Extras)
-    $argumentos = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $scriptRemap) + $Extras
+    # -NoSmallButton: o teste mata o processo, e nao deve deixar o botao pequeno do
+    # mouse de verdade desviado (mudo) depois disso.
+    $argumentos = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $scriptRemap, '-NoSmallButton') + $Extras
     $linha = ($argumentos | ForEach-Object { '"' + $_ + '"' }) -join ' '
     return Start-Process -FilePath 'powershell.exe' -ArgumentList $linha -PassThru -WindowStyle Hidden
 }

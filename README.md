@@ -45,6 +45,9 @@ Para desinstalar: rode `Instalar.cmd` respondendo **N**, depois `Parar-Remap.cmd
 - **Acelera a rolagem da roda** (vertical): girando devagar, cada degrau rola o normal
   (as "linhas por vez" do Windows); girando continuamente, a rolagem vai sendo
   multiplicada — 2x, 3x… até 5x por padrão. Ver [Aceleração da rolagem](#aceleração-da-rolagem).
+- O **botão pequeno abaixo da roda** (Logitech M535 por Bluetooth), que de fábrica abre a
+  Visão de Tarefas (`Win+Tab`), passa a enviar **ALT+F4** — ou o atalho que você escolher.
+  Sem instalar nada da Logitech. Ver [Botão pequeno abaixo da roda](#botão-pequeno-abaixo-da-roda-logitech).
 
 ## O que **não** faz
 
@@ -136,6 +139,9 @@ então rodar de novo não faz nada em vez de empilhar hooks.
 | `-ScrollRampNotches <n>` | Quantos degraus rápidos seguidos sobem o fator em +1. Padrão `2`. |
 | `-ScrollMaxFactor <n>` | Fator máximo da aceleração. Padrão `5` (`1` = sem aceleração). |
 | `-ScrollAccelInjected` | Diagnóstico/teste: acelera também rolagem **injetada** por outros programas (ver abaixo). |
+| `-SmallButtonKeys <atalho>` | Atalho do **botão pequeno abaixo da roda**. Padrão `ALT+F4`. Ex.: `CTRL+W`, `CTRL+SHIFT+T`, `WIN+D`, `PLAYPAUSE` (lista completa abaixo). |
+| `-NoSmallButton` | Não mexe no botão pequeno: ele continua abrindo a Visão de Tarefas. |
+| `-SmallButtonCid <n>` | Avançado: o "control ID" HID++ do botão pequeno. Padrão `0x00D0` (o do M535). |
 
 ### Aceleração da rolagem
 
@@ -165,6 +171,40 @@ de um jeito imprevisível. Só a roda física é acelerada, a menos que você pa
 mude os valores padrão dos parâmetros `ScrollFastMs`, `ScrollRampNotches` e
 `ScrollMaxFactor` no bloco `param(...)` do `Remap-MiddleClickToCtrlF4.ps1` e reinicie
 (`Parar-Remap.cmd` e depois `Iniciar-Remap.vbs`).
+
+### Botão pequeno abaixo da roda (Logitech)
+
+Sem software da Logitech, o M535 manda esse botão como um **atalho de teclado**
+(`Win+Tab`), igual a um teclado de verdade — por isso um hook comum não consegue
+separá-lo. O que o Logi Options+ faz, e o que o script faz agora, é pedir ao **próprio
+mouse**, pelo protocolo HID++ da Logitech, que *desvie* esse controle: o mouse para de
+mandar o `Win+Tab` e passa a avisar o script a cada aperto, e o script envia o atalho.
+
+- Funciona com o mouse ligado **direto por Bluetooth** (não com receptor Unifying/Bolt).
+- O desvio fica na memória do mouse. O script o **desfaz ao encerrar** (Ctrl+C,
+  `-MaxSeconds` ou `Parar-Remap.cmd`) e o **reaplica** sozinho quando o mouse reconecta
+  ou volta a mexer depois de parado.
+- Se o processo for **morto à força** (Gerenciador de Tarefas), o botão fica mudo até o
+  mouse ser desligado e ligado — ou até o script subir de novo.
+- Vale em **todos os programas**, mesmo com `-OnlyProcess` (que só restringe o botão do meio).
+- O `ALT+F4` não é digitado: o script manda à janela em primeiro plano o comando
+  **Fechar** do menu da janela (`WM_SYSCOMMAND`/`SC_CLOSE`), que é o que o `ALT+F4` faz por
+  dentro. Assim funciona também em apps que engolem o `ALT` simulado — como o Bloco de
+  Notas do Windows 11 com o cursor na área de texto. O programa continua podendo perguntar
+  se quer salvar. Os outros atalhos são digitados normalmente.
+- **ALT+F4 sem nenhuma janela em foco** (área de trabalho) abre a caixa "Desligar o
+  Windows" — é o comportamento normal do atalho.
+
+Teclas aceitas em `-SmallButtonKeys`, separadas por `+`: `CTRL`, `ALT`, `SHIFT`, `WIN`;
+`A`–`Z`; `0`–`9`; `F1`–`F24`; `ENTER`, `ESC`, `TAB`, `SPACE`, `BACKSPACE`, `DELETE`,
+`INSERT`, `HOME`, `END`, `PGUP`, `PGDN`, `UP`, `DOWN`, `LEFT`, `RIGHT`; mídia
+`PLAYPAUSE`, `NEXTTRACK`, `PREVTRACK`, `STOP`, `MUTE`, `VOLUP`, `VOLDOWN`.
+
+Para mudar o atalho do dia a dia, troque o padrão de `SmallButtonKeys` no bloco
+`param(...)` do `.ps1` e reinicie (`Parar-Remap.cmd` e depois `Iniciar-Remap.vbs`).
+
+Outro modelo Logitech com botão parecido? Se ele tiver o recurso HID++ `0x1B04`, talvez
+baste trocar `-SmallButtonCid`: o log (`-LogFile`) diz se o controle foi encontrado.
 
 ### Restringir a um programa específico (opcional)
 
@@ -219,6 +259,10 @@ o remapeamento num processo separado, injeta input sintético e confere seis coi
 6. o encerramento por `-MaxSeconds` **desinstala o hook** e o processo sai sozinho,
    inclusive recuperando o mutex quando a instância anterior morreu à força.
 
+O teste roda o script com `-NoSmallButton`: ele mata o processo no meio, e não deve deixar
+o botão pequeno do mouse desviado. O botão pequeno depende do mouse físico e se testa à mão,
+com `-DryRun -LogFile ...` (o log registra cada aperto).
+
 Ele avisa antes de começar (o botão do meio fica remapeado por uns 15 segundos e o cursor
 é movido), devolve o cursor ao lugar no final e não abre nada que possa ser fechado sem
 querer. Sai com código `0` se passou e `1` se falhou.
@@ -261,7 +305,7 @@ pelo VBS). Use `Parar-Remap.cmd` primeiro.
 | `Instalar.cmd` | Instalação em um passo: pergunta sobre iniciar com o Windows e liga o remapeamento. |
 | `Remap-MiddleClickToCtrlF4.ps1` | O remapeamento em si (hook + envio do atalho). |
 | `Iniciar-Remap.vbs` | Lança o `.ps1` sem janela de console. |
-| `Parar-Remap.cmd` | Encerra o processo do remapeamento. |
+| `Parar-Remap.cmd` | Encerra o remapeamento (pede parada limpa, que devolve o botão pequeno ao normal; só força se ele não sair em 6 s). |
 | `Test-Remap.ps1` | Teste automatizado da cadeia completa. |
 
 ## Como funciona por dentro
