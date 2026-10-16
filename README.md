@@ -48,6 +48,8 @@ Para desinstalar: rode `Instalar.cmd` respondendo **N**, depois `Parar-Remap.cmd
 - O **botão pequeno abaixo da roda** (Logitech M535 por Bluetooth), que de fábrica abre a
   Visão de Tarefas (`Win+Tab`), passa a enviar **ALT+F4** — ou o atalho que você escolher.
   Sem instalar nada da Logitech. Ver [Botão pequeno abaixo da roda](#botão-pequeno-abaixo-da-roda-logitech).
+- Cada função se liga, desliga e personaliza **separadamente** pelo ícone na bandeja. Ver
+  [Configurar](#configurar-ícone-na-bandeja).
 
 ## O que **não** faz
 
@@ -81,13 +83,39 @@ Fica em primeiro plano. **Pare com `Ctrl+C`.**
 
 ---
 
+## Configurar (ícone na bandeja)
+
+Enquanto o remapeamento roda, aparece um **ícone de mouse** perto do relógio (azul = ativo,
+cinza = pausado):
+
+- **Clique** no ícone → janela de **Configurações**, com as três funções separadas:
+  - **Botão do meio**: ligar/desligar, atalho (padrão `CTRL+F4`), restringir a um programa;
+  - **Aceleração da rolagem**: ligar/desligar, aceleração máxima, a partir de que
+    velocidade de giro começa a acelerar;
+  - **Botão pequeno abaixo da roda**: ligar/desligar (desligado, volta a abrir a Visão de
+    Tarefas), atalho (padrão `ALT+F4`) e o estado da conexão com o mouse;
+  - **Iniciar com o Windows**.
+
+  O atalho pode ser escolhido na lista ou digitado (`CTRL+SHIFT+T`, `WIN+D`, `F5`…).
+  **Salvar** aplica na hora, sem reiniciar.
+- **Botão direito** no ícone → **Pausar/Retomar** (desliga as três funções de uma vez, sem
+  mudar a configuração) e **Sair**.
+- Rodar o `Iniciar-Remap.vbs` de novo com ele já ativo também abre a janela.
+
+A configuração fica em `%APPDATA%\MiddleClick-CtrlF4\config.json`, fora da pasta do
+programa — sobrevive a atualizações. Parâmetros passados na linha de comando têm
+prioridade sobre o arquivo.
+
+---
+
 ## Rodar sem janela (e iniciar junto com o Windows)
 
 Dê **duplo clique em `Iniciar-Remap.vbs`**. Ele sobe o `.ps1` sem nenhuma janela de
 console — inclusive sem aquele piscar de janela preta que o `-WindowStyle Hidden`
 sozinho às vezes deixa passar.
 
-Como nesse modo não existe `Ctrl+C`, para parar use o **`Parar-Remap.cmd`** (duplo clique).
+Para parar: **Sair** no ícone da bandeja, ou o **`Parar-Remap.cmd`** (duplo clique).
+A inicialização automática também se liga e desliga na janela de configurações.
 
 ### Iniciar automaticamente com o Windows
 
@@ -115,7 +143,7 @@ Para desligar a inicialização automática, apague esse atalho da pasta Inicial
 | Como está rodando | Como parar |
 |---|---|
 | Em primeiro plano (console aberto) | `Ctrl+C` no console |
-| Pelo `Iniciar-Remap.vbs` (sem janela) | Duplo clique em `Parar-Remap.cmd` |
+| Pelo `Iniciar-Remap.vbs` (sem janela) | **Sair** no ícone da bandeja, ou duplo clique em `Parar-Remap.cmd` |
 | Não lembra / travou | `Parar-Remap.cmd`, ou Gerenciador de Tarefas → `powershell.exe` |
 
 Só existe **uma instância por vez**: o script usa um mutex (`.Local\MiddleClick-CtrlF4`),
@@ -127,7 +155,11 @@ então rodar de novo não faz nada em vez de empilhar hooks.
 
 | Parâmetro | Para que serve |
 |---|---|
-| `-TriggerOn Down\|Up` | Manda o `CTRL+F4` quando o botão desce (padrão: `Down`) ou quando sobe. O clique inteiro é suprimido nos dois casos. |
+| `-MiddleClickKeys <atalho>` | Atalho do **clique do meio**. Padrão `CTRL+F4`. Mesmo formato de `-SmallButtonKeys`. |
+| `-NoMiddleClick` | Não mexe no clique do meio (ele volta ao normal). |
+| `-IgnoreConfig` | Ignora o `config.json` e usa só os padrões e os parâmetros (os testes usam isto). |
+| `-NoTray` | Sem ícone na bandeja (e sem janela de configurações). |
+| `-TriggerOn Down\|Up` | Manda o atalho quando o botão desce (padrão: `Down`) ou quando sobe. O clique inteiro é suprimido nos dois casos. |
 | `-OnlyProcess <nome>` | Restringe a **um só programa** (com ou sem `.exe`, ex.: `pje1g`, `chrome`). Nos outros programas o botão do meio volta ao normal. Desligado por padrão. |
 | `-DryRun` | Faz tudo igual ao modo real — **inclusive suprimir o clique do meio** — mas não envia o `CTRL+F4`. Para testar sem disparar o atalho. |
 | `-LogFile <caminho>` | Grava cada evento num arquivo (uma linha por evento, com data/hora). |
@@ -167,10 +199,9 @@ suave etc.) às vezes injetam muitos eventos pequenos; acelerá-los multiplicari
 de um jeito imprevisível. Só a roda física é acelerada, a menos que você passe
 `-ScrollAccelInjected`.
 
-**Para ajustar no dia a dia** (o `Iniciar-Remap.vbs` sobe o script sem argumentos):
-mude os valores padrão dos parâmetros `ScrollFastMs`, `ScrollRampNotches` e
-`ScrollMaxFactor` no bloco `param(...)` do `Remap-MiddleClickToCtrlF4.ps1` e reinicie
-(`Parar-Remap.cmd` e depois `Iniciar-Remap.vbs`).
+**Para ajustar no dia a dia**, use a [janela de configurações](#configurar-ícone-na-bandeja):
+"Aceleração máxima" é o `ScrollMaxFactor` e "Acelera a partir de giros" é o `ScrollFastMs`.
+O `ScrollRampNotches` fica só no `config.json` (campo `RampNotches`) e no parâmetro.
 
 ### Botão pequeno abaixo da roda (Logitech)
 
@@ -200,8 +231,7 @@ Teclas aceitas em `-SmallButtonKeys`, separadas por `+`: `CTRL`, `ALT`, `SHIFT`,
 `INSERT`, `HOME`, `END`, `PGUP`, `PGDN`, `UP`, `DOWN`, `LEFT`, `RIGHT`; mídia
 `PLAYPAUSE`, `NEXTTRACK`, `PREVTRACK`, `STOP`, `MUTE`, `VOLUP`, `VOLDOWN`.
 
-Para mudar o atalho do dia a dia, troque o padrão de `SmallButtonKeys` no bloco
-`param(...)` do `.ps1` e reinicie (`Parar-Remap.cmd` e depois `Iniciar-Remap.vbs`).
+Para mudar o atalho, use a [janela de configurações](#configurar-ícone-na-bandeja).
 
 Outro modelo Logitech com botão parecido? Se ele tiver o recurso HID++ `0x1B04`, talvez
 baste trocar `-SmallButtonCid`: o log (`-LogFile`) diz se o controle foi encontrado.

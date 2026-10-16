@@ -140,8 +140,11 @@ function Esperar-Log {
 function Iniciar-Remap {
     param([string[]]$Extras)
     # -NoSmallButton: o teste mata o processo, e nao deve deixar o botao pequeno do
-    # mouse de verdade desviado (mudo) depois disso.
-    $argumentos = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $scriptRemap, '-NoSmallButton') + $Extras
+    # mouse de verdade desviado (mudo) depois disso. -IgnoreConfig: a configuracao
+    # salva pelo usuario (ex.: clique do meio desligado) nao pode mudar o teste.
+    # -NoTray: sem icone na bandeja piscando durante o teste.
+    $argumentos = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', $scriptRemap,
+        '-NoSmallButton', '-IgnoreConfig', '-NoTray') + $Extras
     $linha = ($argumentos | ForEach-Object { '"' + $_ + '"' }) -join ' '
     return Start-Process -FilePath 'powershell.exe' -ArgumentList $linha -PassThru -WindowStyle Hidden
 }

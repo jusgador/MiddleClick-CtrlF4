@@ -43,6 +43,13 @@
     Modo diagnostico: envia o CTRL+F4 mas deixa o clique do meio passar tambem.
     Em navegador isso significa "abrir link em nova aba" E o CTRL+F4 ao mesmo tempo.
 
+.PARAMETER MiddleClickKeys
+    Atalho enviado pelo clique do botao do meio. Padrao 'CTRL+F4'. Mesmo formato de
+    -SmallButtonKeys.
+
+.PARAMETER NoMiddleClick
+    Nao mexe no clique do botao do meio (ele volta ao normal).
+
 .PARAMETER OnlyProcess
     Restringe o remapeamento a um unico programa (nome do processo, com ou sem .exe,
     ex.: 'pje1g'). Nos demais programas o clique do meio funciona normalmente.
@@ -92,6 +99,13 @@
 .PARAMETER SmallButtonCid
     Avancado: o "control ID" HID++ do botao pequeno. Padrao 0x00D0 (o do M535).
 
+.PARAMETER IgnoreConfig
+    Ignora o arquivo de configuracao (%APPDATA%\MiddleClick-CtrlF4\config.json) e
+    usa so' os padroes e os parametros. Os testes usam isto.
+
+.PARAMETER NoTray
+    Nao mostra o icone na bandeja (nem a janela de configuracoes).
+
 .EXAMPLE
     .\Remap-MiddleClickToCtrlF4.ps1
     Remapeamento global, em primeiro plano. Pare com Ctrl+C.
@@ -113,6 +127,11 @@
     Testa o hook sem enviar o atalho, registrando tudo no log.
 
 .NOTES
+    CONFIGURACAO: os valores vem, nesta ordem de prioridade, dos parametros passados
+    na linha de comando, do arquivo %APPDATA%\MiddleClick-CtrlF4\config.json (gravado
+    pela janela de configuracoes) e dos padroes acima. A janela abre clicando no icone
+    da bandeja, ou rodando o script (ou o Iniciar-Remap.vbs) de novo com ele ja ativo.
+
     Projeto: D:\dev\MiddleClick-CtrlF4
     Requer: Windows + Windows PowerShell 5.1 (ou PowerShell 7). Nada para instalar.
 #>
@@ -126,6 +145,10 @@ param(
     [string]$LogFile,
 
     [switch]$NoSwallow,
+
+    [string]$MiddleClickKeys = 'CTRL+F4',
+
+    [switch]$NoMiddleClick,
 
     [string]$OnlyProcess,
 
@@ -151,7 +174,11 @@ param(
     [switch]$NoSmallButton,
 
     [ValidateRange(1, 0xFFFF)]
-    [int]$SmallButtonCid = 0x00D0
+    [int]$SmallButtonCid = 0x00D0,
+
+    [switch]$IgnoreConfig,
+
+    [switch]$NoTray
 )
 
 Set-StrictMode -Version 2.0
@@ -173,7 +200,17 @@ catch [System.Threading.AbandonedMutexException] {
 }
 
 if (-not $adquiriu) {
-    Write-Warning 'O remapeamento ja esta em execucao nesta sessao. Nada a fazer.'
+    # Ja tem um rodando: pede a ele que abra a janela de configuracoes.
+    $pediu = $false
+    try {
+        $evento = [System.Threading.EventWaitHandle]::OpenExisting('Local\MiddleClick-CtrlF4-Configurar')
+        [void]$evento.Set()
+        $evento.Dispose()
+        $pediu = $true
+    }
+    catch { }
+    if ($pediu) { Write-Host 'O remapeamento ja esta em execucao: abrindo a janela de configuracoes dele.' }
+    else { Write-Warning 'O remapeamento ja esta em execucao nesta sessao. Nada a fazer.' }
     $mutex.Dispose()
     exit 0
 }
@@ -363,7 +400,12 @@ public static class MiddleClickRemap
 
     private static bool _dryRun;
     private static bool _swallow = true;
-    private static string _onlyProcess;
+    // Configuracao do clique do meio: pode mudar com o hook rodando (janela de
+    // configuracoes, pausa), por isso volatil e lida uma vez por evento.
+    private static volatile string _onlyProcess;
+    private static volatile bool _meioAtivo = true;
+    private static volatile ushort[] _teclasMeio = new ushort[] { VK_CONTROL, VK_F4 };
+    private static volatile string _nomeMeio = "CTRL+F4";
     private static bool _triggerOnDown = true;
     private static int _holdMs;
 
@@ -415,9 +457,28 @@ public static class MiddleClickRemap
         _rolagemAceleraInjetada = accelerateInjected;
         _temRodaAnterior = false;
         _sequenciaRapida = 0;
+
+        Log(_rolagemAcelerada
+            ? "aceleracao da rolagem: ligada (" + _rolagemRapidaMs.ToString() + " ms, +1x a cada " +
+              _rolagemDegrausPorPasso.ToString() + " degraus, maximo " + _rolagemFatorMaximo.ToString() + "x" +
+              (_rolagemAceleraInjetada ? ", inclusive rolagem injetada" : "") + ")."
+            : "aceleracao da rolagem: desligada.");
     }
 
-    public static void Start(string logFile, bool dryRun, bool swallow, string onlyProcess, string triggerOn, int holdMilliseconds)
+    public static void ConfigureMiddleClick(bool enabled, ushort[] keys, string keysName, string onlyProcess)
+    {
+        _teclasMeio = (keys != null && keys.Length > 0) ? keys : new ushort[] { VK_CONTROL, VK_F4 };
+        _nomeMeio = string.IsNullOrEmpty(keysName) ? "CTRL+F4" : keysName;
+        _onlyProcess = string.IsNullOrEmpty(onlyProcess) ? null : NormalizeProcess(onlyProcess);
+        _ultimoPid = 0;   // invalida o cache do filtro por programa
+        _meioAtivo = enabled;
+
+        Log(enabled
+            ? "clique do meio: ligado -> " + _nomeMeio + (_onlyProcess != null ? " (so' em " + _onlyProcess + ")" : "") + "."
+            : "clique do meio: desligado (passa normal).");
+    }
+
+    public static void Start(string logFile, bool dryRun, bool swallow, string triggerOn, int holdMilliseconds)
     {
         if (_running)
         {
@@ -426,7 +487,6 @@ public static class MiddleClickRemap
 
         _dryRun = dryRun;
         _swallow = swallow;
-        _onlyProcess = string.IsNullOrEmpty(onlyProcess) ? null : NormalizeProcess(onlyProcess);
         _triggerOnDown = !string.Equals(triggerOn, "Up", StringComparison.OrdinalIgnoreCase);
         _holdMs = holdMilliseconds < 0 ? 0 : holdMilliseconds;
 
@@ -524,11 +584,6 @@ public static class MiddleClickRemap
             }
 
             Log("hook WH_MOUSE_LL instalado (thread " + _threadId.ToString() + ").");
-            Log(_rolagemAcelerada
-                ? "aceleracao da rolagem: ligada (" + _rolagemRapidaMs.ToString() + " ms, +1x a cada " +
-                  _rolagemDegrausPorPasso.ToString() + " degraus, maximo " + _rolagemFatorMaximo.ToString() + "x" +
-                  (_rolagemAceleraInjetada ? ", inclusive rolagem injetada" : "") + ")."
-                : "aceleracao da rolagem: desligada.");
             _ready.Set();
 
             MSG msg;
@@ -601,7 +656,14 @@ public static class MiddleClickRemap
                 return CallNextHookEx(_hook, nCode, wParam, lParam);
             }
 
-            if (_onlyProcess != null && !PrimeiroPlanoCasa(_onlyProcess))
+            // Funcao desligada (configuracoes ou pausa): o clique do meio volta ao normal.
+            if (!_meioAtivo)
+            {
+                return CallNextHookEx(_hook, nCode, wParam, lParam);
+            }
+
+            string soPrograma = _onlyProcess;
+            if (soPrograma != null && !PrimeiroPlanoCasa(soPrograma))
             {
                 return CallNextHookEx(_hook, nCode, wParam, lParam);
             }
@@ -611,14 +673,16 @@ public static class MiddleClickRemap
             bool dispara = (_triggerOnDown && ehDown) || (!_triggerOnDown && ehUp);
             if (dispara)
             {
+                ushort[] teclas = _teclasMeio;
+                string nome = _nomeMeio;
                 if (_dryRun)
                 {
-                    Log("clique do meio detectado -> DRY-RUN: enviaria CTRL+F4 (nao enviado).");
+                    Log("clique do meio detectado -> DRY-RUN: enviaria " + nome + " (nao enviado).");
                 }
                 else
                 {
-                    Log("clique do meio detectado -> enviando CTRL+F4.");
-                    ThreadPool.QueueUserWorkItem(SendWorker);
+                    Log("clique do meio detectado -> enviando " + nome + ".");
+                    ThreadPool.QueueUserWorkItem(SendWorker, new object[] { teclas, nome });
                 }
             }
 
@@ -709,33 +773,39 @@ public static class MiddleClickRemap
     // Roda no ThreadPool: fora do callback do hook.
     private static void SendWorker(object state)
     {
-        try
+        object[] dados = (object[])state;
+        if (EnviarAtalho((ushort[])dados[0], (string)dados[1]))
         {
-            int enviados = SendCtrlF4();
-            if (enviados > 0)
-            {
-                Interlocked.Increment(ref _ctrlF4Enviados);
-            }
-            Log("SendInput retornou " + enviados.ToString() + "/4 eventos." +
-                (enviados == 4 ? "" : " (atencao: envio bloqueado ou recusado pelo Windows)"));
-        }
-        catch (Exception ex)
-        {
-            Log("falha ao enviar CTRL+F4: " + ex.Message);
+            Interlocked.Increment(ref _ctrlF4Enviados);
         }
     }
 
-    private static int SendCtrlF4()
+    // Envia o atalho para a janela em primeiro plano e registra no log. Usado pelo
+    // clique do meio e pelo botao pequeno. Fora do callback do hook, sempre.
+    internal static bool EnviarAtalho(ushort[] teclas, string nome)
     {
-        INPUT[] aperta = new INPUT[] { MakeKey(VK_CONTROL, false), MakeKey(VK_F4, false) };
-        INPUT[] solta  = new INPUT[] { MakeKey(VK_F4, true), MakeKey(VK_CONTROL, true) };
-        int tamanho = Marshal.SizeOf(typeof(INPUT));
+        try
+        {
+            string alvo = DescreverPrimeiroPlano();
+            if (teclas.Length == 2 && teclas[0] == 0x12 && teclas[1] == VK_F4)   // ALT+F4
+            {
+                bool ok = FecharJanelaEmFoco();
+                Log("comando Fechar (WM_SYSCOMMAND SC_CLOSE) " + (ok ? "enviado" : "NAO enviado") +
+                    " para " + alvo + "." + (ok ? "" : " (atencao: janela elevada ou inexistente)"));
+                return ok;
+            }
 
-        uint total = SendInput((uint)aperta.Length, aperta, tamanho);
-        if (_holdMs > 0) Thread.Sleep(_holdMs);
-        total += SendInput((uint)solta.Length, solta, tamanho);
-
-        return (int)total;
+            int enviados = EnviarTeclas(teclas);
+            int esperados = teclas.Length * 2;
+            Log("SendInput retornou " + enviados.ToString() + "/" + esperados.ToString() + " eventos, para " + alvo + "." +
+                (enviados == esperados ? "" : " (atencao: envio bloqueado ou recusado pelo Windows)"));
+            return enviados > 0;
+        }
+        catch (Exception ex)
+        {
+            Log("falha ao enviar " + nome + ": " + ex.Message);
+            return false;
+        }
     }
 
     // Envia um atalho qualquer: aperta as teclas na ordem e solta na ordem inversa.
@@ -854,7 +924,7 @@ public static class MiddleClickRemap
     // -------------------------------------------------------------------
     // Log
     // -------------------------------------------------------------------
-    internal static void Log(string mensagem)
+    public static void Log(string mensagem)
     {
         lock (_sync)
         {
@@ -975,8 +1045,8 @@ public static class LogiSmallButton
 
     // ---- Configuracao ----
     private static ushort _cid = 0x00D0;
-    private static ushort[] _teclas;
-    private static string _nomeAtalho = "";
+    private static volatile ushort[] _teclas;
+    private static volatile string _nomeAtalho = "";
     private static bool _dryRun;
     private static int _ociosoMs = 15000;
 
@@ -1033,6 +1103,19 @@ public static class LogiSmallButton
         _thread.IsBackground = true;
         _thread.Name = "LogiSmallButton";
         _thread.Start();
+    }
+
+    // Troca o atalho sem mexer no desvio do mouse.
+    public static void SetKeys(ushort[] teclas, string nomeAtalho)
+    {
+        _teclas = teclas;
+        _nomeAtalho = nomeAtalho;
+        if (_desviado) _estado = "ativo -> " + nomeAtalho;
+    }
+
+    public static bool Running
+    {
+        get { return _running; }
     }
 
     public static void Stop()
@@ -1165,7 +1248,7 @@ public static class LogiSmallButton
             else
             {
                 MiddleClickRemap.Log("botao pequeno apertado -> enviando " + _nomeAtalho + ".");
-                ThreadPool.QueueUserWorkItem(EnviarWorker);
+                ThreadPool.QueueUserWorkItem(EnviarWorker, new object[] { _teclas, _nomeAtalho });
             }
         }
         _apertado = apertado;
@@ -1173,25 +1256,8 @@ public static class LogiSmallButton
 
     private static void EnviarWorker(object estado)
     {
-        try
-        {
-            string alvo = MiddleClickRemap.DescreverPrimeiroPlano();
-            if (_teclas.Length == 2 && _teclas[0] == 0x12 && _teclas[1] == 0x73)   // ALT+F4
-            {
-                bool ok = MiddleClickRemap.FecharJanelaEmFoco();
-                MiddleClickRemap.Log("comando Fechar (WM_SYSCOMMAND SC_CLOSE) " + (ok ? "enviado" : "NAO enviado") +
-                    " para " + alvo + "." + (ok ? "" : " (atencao: janela elevada ou inexistente)"));
-                return;
-            }
-            int enviados = MiddleClickRemap.EnviarTeclas(_teclas);
-            int esperados = _teclas.Length * 2;
-            MiddleClickRemap.Log("SendInput retornou " + enviados.ToString() + "/" + esperados.ToString() + " eventos, para " + alvo + "." +
-                (enviados == esperados ? "" : " (atencao: envio bloqueado ou recusado pelo Windows)"));
-        }
-        catch (Exception ex)
-        {
-            MiddleClickRemap.Log("falha ao enviar " + _nomeAtalho + ": " + ex.Message);
-        }
+        object[] dados = (object[])estado;
+        MiddleClickRemap.EnviarAtalho((ushort[])dados[0], (string)dados[1]);
     }
 
     // -------------------------------------------------------------------
@@ -1486,6 +1552,25 @@ public static class LogiSmallButton
         return null;
     }
 }
+
+// Ctrl+C no console vira um pedido de parada limpa (o mesmo evento do
+// Parar-Remap.cmd), em vez de matar o processo no meio do loop do WinForms.
+public static class SinalCtrlC
+{
+    private static EventWaitHandle _evento;
+    private static ConsoleCancelEventHandler _tratador;
+
+    public static void Instalar(EventWaitHandle evento)
+    {
+        _evento = evento;
+        _tratador = delegate(object remetente, ConsoleCancelEventArgs e)
+        {
+            e.Cancel = true;
+            _evento.Set();
+        };
+        try { Console.CancelKeyPress += _tratador; } catch { }
+    }
+}
 '@
 
 if (-not ('MiddleClickRemap' -as [type])) {
@@ -1493,7 +1578,7 @@ if (-not ('MiddleClickRemap' -as [type])) {
 }
 
 # ---------------------------------------------------------------------------
-# Atalho do botao pequeno: 'CTRL+SHIFT+T' -> codigos de tecla virtual.
+# Atalhos: 'CTRL+SHIFT+T' -> codigos de tecla virtual.
 # ---------------------------------------------------------------------------
 function ConvertTo-TeclasVirtuais {
     param([string]$Atalho)
@@ -1509,28 +1594,361 @@ function ConvertTo-TeclasVirtuais {
     }
 
     $teclas = New-Object System.Collections.Generic.List[uint16]
-    foreach ($parte in ($Atalho -split '\+')) {
+    foreach ($parte in ([string]$Atalho -split '\+')) {
         $nome = $parte.Trim().ToUpperInvariant()
-        if ($nome -eq '') { throw "Atalho invalido em -SmallButtonKeys: '$Atalho'." }
+        if ($nome -eq '') { throw "Atalho invalido: '$Atalho'." }
         if ($nomes.ContainsKey($nome)) { $teclas.Add([uint16]$nomes[$nome]) }
         elseif ($nome -match '^[A-Z0-9]$') { $teclas.Add([uint16][char]$nome) }
         elseif ($nome -match '^F([1-9]|1[0-9]|2[0-4])$') { $teclas.Add([uint16](0x6F + [int]$Matches[1])) }
-        else { throw "Tecla desconhecida em -SmallButtonKeys: '$parte'. Veja Get-Help .\Remap-MiddleClickToCtrlF4.ps1 -Parameter SmallButtonKeys." }
+        else { throw "Tecla desconhecida no atalho '$Atalho': '$($parte.Trim())'." }
     }
     return , $teclas.ToArray()
 }
 
-$teclasBotaoPequeno = $null
-if (-not $NoSmallButton.IsPresent) {
-    $teclasBotaoPequeno = ConvertTo-TeclasVirtuais $SmallButtonKeys
-    $SmallButtonKeys = $SmallButtonKeys.ToUpperInvariant()
+# ---------------------------------------------------------------------------
+# Configuracao: padroes < arquivo config.json (janela de configuracoes) <
+# parametros passados na linha de comando. O arquivo fica no perfil do usuario,
+# fora da pasta do programa, para sobreviver a atualizacoes.
+# ---------------------------------------------------------------------------
+$arquivoConfig = Join-Path (Join-Path $env:APPDATA 'MiddleClick-CtrlF4') 'config.json'
+$atalhoInicializar = Join-Path ([Environment]::GetFolderPath('Startup')) 'Remap botao do meio.lnk'
+
+function New-ConfigPadrao {
+    [pscustomobject]@{
+        MiddleClick = [pscustomobject]@{ Enabled = $true; Keys = 'CTRL+F4'; OnlyProcess = '' }
+        ScrollAccel = [pscustomobject]@{ Enabled = $true; MaxFactor = 5; FastMs = 80; RampNotches = 2 }
+        SmallButton = [pscustomobject]@{ Enabled = $true; Keys = 'ALT+F4' }
+    }
 }
 
-# Pedido de parada limpa vindo de fora (Parar-Remap.cmd / Instalar.cmd): sem ele,
-# so' daria para matar o processo, e o botao pequeno ficaria desviado e mudo ate'
-# o mouse ser desligado e ligado.
+# Copia por cima do padrao so' os campos conhecidos e do tipo certo: um arquivo
+# editado a mao ou de versao antiga nunca impede o remapeamento de subir.
+function Read-ConfigArquivo {
+    param($Config)
+    if (-not (Test-Path -LiteralPath $arquivoConfig)) { return $Config }
+    try {
+        $lido = Get-Content -LiteralPath $arquivoConfig -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    catch {
+        Write-Warning ("Ignorando " + $arquivoConfig + " (JSON invalido): " + $_.Exception.Message)
+        return $Config
+    }
+    foreach ($secao in $Config.PSObject.Properties) {
+        $origem = $lido.PSObject.Properties[$secao.Name]
+        if (-not $origem -or $null -eq $origem.Value) { continue }
+        foreach ($campo in $secao.Value.PSObject.Properties) {
+            $valor = $origem.Value.PSObject.Properties[$campo.Name]
+            if (-not $valor -or $null -eq $valor.Value) { continue }
+            $convertido = $valor.Value -as $campo.Value.GetType()
+            if ($null -ne $convertido) { $campo.Value = $convertido }
+        }
+    }
+    foreach ($secao in 'MiddleClick', 'SmallButton') {
+        try { [void](ConvertTo-TeclasVirtuais $Config.$secao.Keys) }
+        catch {
+            Write-Warning ("Atalho invalido em " + $arquivoConfig + " (" + $secao + "): " + $_.Exception.Message + " Usando o padrao.")
+            $Config.$secao.Keys = (New-ConfigPadrao).$secao.Keys
+        }
+    }
+    return $Config
+}
+
+function Save-ConfigArquivo {
+    param($Config)
+    $pasta = Split-Path -Parent $arquivoConfig
+    if (-not (Test-Path -LiteralPath $pasta)) { [void](New-Item -ItemType Directory -Path $pasta) }
+    $Config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $arquivoConfig -Encoding UTF8
+}
+
+function Copy-Config {
+    param($Config)
+    return ($Config | ConvertTo-Json -Depth 4 | ConvertFrom-Json)
+}
+
+$config = New-ConfigPadrao
+if (-not $IgnoreConfig.IsPresent) { $config = Read-ConfigArquivo $config }
+
+# Parametros explicitos ganham do arquivo (e um atalho invalido aqui e' erro).
+$p = $PSBoundParameters
+if ($p.ContainsKey('NoMiddleClick')) { $config.MiddleClick.Enabled = -not $NoMiddleClick.IsPresent }
+if ($p.ContainsKey('MiddleClickKeys')) { [void](ConvertTo-TeclasVirtuais $MiddleClickKeys); $config.MiddleClick.Keys = $MiddleClickKeys }
+if ($p.ContainsKey('OnlyProcess')) { $config.MiddleClick.OnlyProcess = $OnlyProcess }
+if ($p.ContainsKey('NoScrollAccel')) { $config.ScrollAccel.Enabled = -not $NoScrollAccel.IsPresent }
+if ($p.ContainsKey('ScrollMaxFactor')) { $config.ScrollAccel.MaxFactor = $ScrollMaxFactor }
+if ($p.ContainsKey('ScrollFastMs')) { $config.ScrollAccel.FastMs = $ScrollFastMs }
+if ($p.ContainsKey('ScrollRampNotches')) { $config.ScrollAccel.RampNotches = $ScrollRampNotches }
+if ($p.ContainsKey('NoSmallButton')) { $config.SmallButton.Enabled = -not $NoSmallButton.IsPresent }
+if ($p.ContainsKey('SmallButtonKeys')) { [void](ConvertTo-TeclasVirtuais $SmallButtonKeys); $config.SmallButton.Keys = $SmallButtonKeys }
+foreach ($secao in 'MiddleClick', 'SmallButton') { $config.$secao.Keys = $config.$secao.Keys.ToUpperInvariant() }
+
+# Liga/desliga e reconfigura as tres funcoes. Pode ser chamado com tudo rodando
+# (janela de configuracoes, pausa); -Pausar desliga as tres sem mexer na config.
+function Set-Funcoes {
+    param($Config, [switch]$Pausar)
+
+    $meio = $Config.MiddleClick
+    [MiddleClickRemap]::ConfigureMiddleClick(($meio.Enabled -and -not $Pausar),
+        (ConvertTo-TeclasVirtuais $meio.Keys), $meio.Keys, $meio.OnlyProcess)
+
+    $rolagem = $Config.ScrollAccel
+    [MiddleClickRemap]::ConfigureScrollAccel(($rolagem.Enabled -and -not $Pausar),
+        $rolagem.FastMs, $rolagem.RampNotches, $rolagem.MaxFactor, $ScrollAccelInjected.IsPresent)
+
+    $botao = $Config.SmallButton
+    if ($botao.Enabled -and -not $Pausar) {
+        $teclas = ConvertTo-TeclasVirtuais $botao.Keys
+        if ([LogiSmallButton]::Running) { [LogiSmallButton]::SetKeys($teclas, $botao.Keys) }
+        else { [LogiSmallButton]::Start($SmallButtonCid, $teclas, $botao.Keys, $DryRun.IsPresent) }
+    }
+    elseif ([LogiSmallButton]::Running) {
+        [LogiSmallButton]::Stop()   # devolve o botao ao normal (Visao de Tarefas)
+    }
+}
+
+# Pedido de parada limpa vindo de fora (Parar-Remap.cmd / Instalar.cmd / Sair na
+# bandeja / Ctrl+C): sem ele so' daria para matar o processo, e o botao pequeno
+# ficaria desviado e mudo ate' o mouse ser desligado e ligado.
 $eventoParar = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, 'Local\MiddleClick-CtrlF4-Parar')
 [void]$eventoParar.Reset()
+# Uma segunda copia do script (ex.: duplo clique de novo no Iniciar-Remap.vbs)
+# sinaliza este evento para abrir a janela de configuracoes desta.
+$eventoConfigurar = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, 'Local\MiddleClick-CtrlF4-Configurar')
+[SinalCtrlC]::Instalar($eventoParar)
+
+$usarBandeja = (-not $NoTray.IsPresent) -and
+    ([System.Threading.Thread]::CurrentThread.GetApartmentState() -eq [System.Threading.ApartmentState]::STA)
+
+# ---------------------------------------------------------------------------
+# Icone na bandeja e janela de configuracoes (WinForms)
+# ---------------------------------------------------------------------------
+function New-IconeMouse {
+    param([bool]$Ativo)
+    $bmp = New-Object System.Drawing.Bitmap 32, 32
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $cor = if ($Ativo) { [System.Drawing.Color]::FromArgb(0, 120, 212) } else { [System.Drawing.Color]::FromArgb(140, 140, 140) }
+
+    $x = 7; $y = 1; $w = 18; $h = 30; $d = 16
+    $corpo = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $corpo.AddArc($x, $y, $d, $d, 180, 90)
+    $corpo.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
+    $corpo.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90)
+    $corpo.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
+    $corpo.CloseFigure()
+    $pincel = New-Object System.Drawing.SolidBrush $cor
+    $g.FillPath($pincel, $corpo)
+
+    $branco = New-Object System.Drawing.Pen ([System.Drawing.Color]::White), 2
+    $g.DrawLine($branco, 16, 2, 16, 13)          # divisao entre os botoes
+    $g.DrawLine($branco, 8, 13, 24, 13)          # fim dos botoes
+    $g.FillRectangle([System.Drawing.Brushes]::White, 14, 5, 4, 6)   # roda
+
+    $g.Dispose(); $pincel.Dispose(); $branco.Dispose(); $corpo.Dispose()
+    return [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+}
+
+$script:pausado = $false
+$script:janela = $null
+
+function Update-Bandeja {
+    if (-not $script:bandeja) { return }
+    if ($script:pausado) {
+        $script:bandeja.Icon = $script:iconePausado
+        $script:bandeja.Text = 'Remap do mouse: pausado'
+        $script:itemPausar.Text = 'Retomar'
+    }
+    else {
+        $script:bandeja.Icon = $script:iconeAtivo
+        $texto = 'Remap do mouse: ativo'
+        if ($DryRun.IsPresent) { $texto += ' (DRY-RUN)' }
+        $script:bandeja.Text = $texto
+        $script:itemPausar.Text = 'Pausar'
+    }
+}
+
+function Switch-Pausa {
+    $script:pausado = -not $script:pausado
+    Set-Funcoes -Config $script:config -Pausar:$script:pausado
+    [MiddleClickRemap]::Log($(if ($script:pausado) { 'pausado pela bandeja.' } else { 'retomado pela bandeja.' }))
+    Update-Bandeja
+}
+
+function Set-IniciarComWindows {
+    param([bool]$Ligar)
+    if ($Ligar) {
+        $ws = New-Object -ComObject WScript.Shell
+        $lnk = $ws.CreateShortcut($atalhoInicializar)
+        $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        $lnk.Arguments = '"' + (Join-Path $PSScriptRoot 'Iniciar-Remap.vbs') + '"'
+        $lnk.WorkingDirectory = $PSScriptRoot
+        $lnk.Description = 'Remap do mouse: botao do meio, rolagem e botao pequeno'
+        $lnk.Save()
+    }
+    elseif (Test-Path -LiteralPath $atalhoInicializar) {
+        Remove-Item -LiteralPath $atalhoInicializar -Force
+    }
+}
+
+function Show-Configuracoes {
+    if ($script:janela) { $script:janela.Activate(); return }
+
+    $presets = @('CTRL+F4', 'CTRL+W', 'ALT+F4', 'CTRL+T', 'CTRL+SHIFT+T', 'CTRL+TAB', 'WIN+D', 'ENTER', 'ESC', 'PLAYPAUSE', 'MUTE')
+    $c = $script:config
+
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = 'Remap do mouse — Configurações'
+    $f.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $f.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Font
+    $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
+    $f.MaximizeBox = $false
+    $f.MinimizeBox = $false
+    $f.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $f.ClientSize = New-Object System.Drawing.Size 470, 470
+    $f.Icon = $script:iconeAtivo
+    $f.ShowInTaskbar = $true
+
+    function Add-Controle($pai, $controle, $x, $y, $w, $h) {
+        $controle.Location = New-Object System.Drawing.Point $x, $y
+        if ($w) { $controle.Width = $w }
+        if ($h) { $controle.Height = $h }
+        $pai.Controls.Add($controle)
+        return $controle
+    }
+    function New-Rotulo($texto) {
+        $r = New-Object System.Windows.Forms.Label
+        $r.Text = $texto
+        $r.AutoSize = $true
+        return $r
+    }
+    function New-Atalho($valor) {
+        $cb = New-Object System.Windows.Forms.ComboBox
+        $cb.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDown
+        $cb.Items.AddRange([object[]]$presets)
+        $cb.Text = $valor
+        return $cb
+    }
+
+    # --- Botao do meio ---
+    $g1 = Add-Controle $f (New-Object System.Windows.Forms.GroupBox) 12 10 446 118
+    $g1.Text = 'Botão do meio (clique na roda)'
+    $chkMeio = Add-Controle $g1 (New-Object System.Windows.Forms.CheckBox) 14 24 300 0
+    $chkMeio.Text = 'Ativar'; $chkMeio.Checked = [bool]$c.MiddleClick.Enabled
+    [void](Add-Controle $g1 (New-Rotulo 'Atalho:') 30 55 0 0)
+    $cbMeio = Add-Controle $g1 (New-Atalho $c.MiddleClick.Keys) 200 51 220 0
+    [void](Add-Controle $g1 (New-Rotulo 'Só no programa (vazio = todos):') 30 86 0 0)
+    $txtPrograma = Add-Controle $g1 (New-Object System.Windows.Forms.TextBox) 200 82 220 0
+    $txtPrograma.Text = $c.MiddleClick.OnlyProcess
+
+    # --- Rolagem ---
+    $g2 = Add-Controle $f (New-Object System.Windows.Forms.GroupBox) 12 138 446 150
+    $g2.Text = 'Aceleração da rolagem'
+    $chkRol = Add-Controle $g2 (New-Object System.Windows.Forms.CheckBox) 14 24 300 0
+    $chkRol.Text = 'Ativar'; $chkRol.Checked = [bool]$c.ScrollAccel.Enabled
+    [void](Add-Controle $g2 (New-Rotulo 'Aceleração máxima:') 30 55 0 0)
+    $numFator = Add-Controle $g2 (New-Object System.Windows.Forms.NumericUpDown) 200 52 60 0
+    $numFator.Minimum = 2; $numFator.Maximum = 20
+    $numFator.Value = [Math]::Min(20, [Math]::Max(2, [int]$c.ScrollAccel.MaxFactor))
+    [void](Add-Controle $g2 (New-Rotulo 'vezes') 266 55 0 0)
+    [void](Add-Controle $g2 (New-Rotulo 'Acelera a partir de giros:') 30 90 0 0)
+    $trkVel = Add-Controle $g2 (New-Object System.Windows.Forms.TrackBar) 196 84 180 0
+    $trkVel.Minimum = 40; $trkVel.Maximum = 200; $trkVel.SmallChange = 10; $trkVel.LargeChange = 20; $trkVel.TickFrequency = 20
+    $trkVel.Value = [Math]::Min(200, [Math]::Max(40, [int]$c.ScrollAccel.FastMs))
+    $lblVel = Add-Controle $g2 (New-Rotulo '') 380 90 0 0
+    [void](Add-Controle $g2 (New-Rotulo 'rápidos') 196 122 0 0)
+    [void](Add-Controle $g2 (New-Rotulo 'mais lentos') 318 122 0 0)
+    $atualizarVel = { $lblVel.Text = [string]$trkVel.Value + ' ms' }
+    & $atualizarVel
+    $trkVel.add_ValueChanged($atualizarVel)
+
+    # --- Botao pequeno ---
+    $g3 = Add-Controle $f (New-Object System.Windows.Forms.GroupBox) 12 298 446 112
+    $g3.Text = 'Botão pequeno abaixo da roda (Logitech M535)'
+    $chkBotao = Add-Controle $g3 (New-Object System.Windows.Forms.CheckBox) 14 24 420 0
+    $chkBotao.Text = 'Ativar (desligado, volta a abrir a Visão de Tarefas)'; $chkBotao.Checked = [bool]$c.SmallButton.Enabled
+    [void](Add-Controle $g3 (New-Rotulo 'Atalho:') 30 55 0 0)
+    $cbBotao = Add-Controle $g3 (New-Atalho $c.SmallButton.Keys) 200 51 220 0
+    [void](Add-Controle $g3 (New-Rotulo 'Mouse:') 30 86 0 0)
+    $lblEstado = Add-Controle $g3 (New-Rotulo '') 200 86 0 0
+
+    # --- Rodape ---
+    $chkWindows = Add-Controle $f (New-Object System.Windows.Forms.CheckBox) 14 426 220 0
+    $chkWindows.Text = 'Iniciar com o Windows'
+    $chkWindows.Checked = Test-Path -LiteralPath $atalhoInicializar
+    $btnSalvar = Add-Controle $f (New-Object System.Windows.Forms.Button) 284 422 84 28
+    $btnSalvar.Text = 'Salvar'
+    $btnCancelar = Add-Controle $f (New-Object System.Windows.Forms.Button) 374 422 84 28
+    $btnCancelar.Text = 'Cancelar'
+    $btnCancelar.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $f.AcceptButton = $btnSalvar
+    $f.CancelButton = $btnCancelar
+
+    $habilitar = {
+        $cbMeio.Enabled = $chkMeio.Checked; $txtPrograma.Enabled = $chkMeio.Checked
+        $numFator.Enabled = $chkRol.Checked; $trkVel.Enabled = $chkRol.Checked
+        $cbBotao.Enabled = $chkBotao.Checked
+    }
+    & $habilitar
+    $chkMeio.add_CheckedChanged($habilitar)
+    $chkRol.add_CheckedChanged($habilitar)
+    $chkBotao.add_CheckedChanged($habilitar)
+
+    $atualizarEstado = {
+        $lblEstado.Text = if ($script:pausado) { 'pausado' }
+            elseif (-not $chkBotao.Checked -and -not [LogiSmallButton]::Running) { 'desligado' }
+            else { [LogiSmallButton]::Estado }
+    }
+    & $atualizarEstado
+    $relogio = New-Object System.Windows.Forms.Timer
+    $relogio.Interval = 1000
+    $relogio.add_Tick($atualizarEstado)
+    $relogio.Start()
+
+    $btnSalvar.add_Click({
+        $nova = Copy-Config $script:config
+        $nova.MiddleClick.Enabled = $chkMeio.Checked
+        $nova.MiddleClick.Keys = $cbMeio.Text.Trim().ToUpperInvariant()
+        $nova.MiddleClick.OnlyProcess = $txtPrograma.Text.Trim()
+        $nova.ScrollAccel.Enabled = $chkRol.Checked
+        $nova.ScrollAccel.MaxFactor = [int]$numFator.Value
+        $nova.ScrollAccel.FastMs = [int]$trkVel.Value
+        $nova.SmallButton.Enabled = $chkBotao.Checked
+        $nova.SmallButton.Keys = $cbBotao.Text.Trim().ToUpperInvariant()
+
+        foreach ($par in @(@($cbMeio, 'do botão do meio'), @($cbBotao, 'do botão pequeno'))) {
+            try { [void](ConvertTo-TeclasVirtuais $par[0].Text) }
+            catch {
+                [void][System.Windows.Forms.MessageBox]::Show($f,
+                    ('Atalho ' + $par[1] + ' inválido: ' + $_.Exception.Message + "`n`n" +
+                     'Use teclas separadas por "+", por exemplo CTRL+W, CTRL+SHIFT+T, WIN+D, F5, PLAYPAUSE.'),
+                    'Atalho inválido', 'OK', 'Warning')
+                $par[0].Focus()
+                return
+            }
+        }
+
+        try {
+            Save-ConfigArquivo $nova
+            Set-IniciarComWindows $chkWindows.Checked
+        }
+        catch {
+            [void][System.Windows.Forms.MessageBox]::Show($f, ('Não consegui salvar: ' + $_.Exception.Message), 'Erro', 'OK', 'Error')
+            return
+        }
+        $script:config = $nova
+        if (-not $script:pausado) { Set-Funcoes -Config $nova }
+        [MiddleClickRemap]::Log('configuracao salva e aplicada pela janela.')
+        $f.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $f.Close()
+    })
+
+    $script:janela = $f
+    try { [void]$f.ShowDialog() }
+    finally {
+        $relogio.Stop(); $relogio.Dispose()
+        $f.Dispose()
+        $script:janela = $null
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Sobe o remapeamento
@@ -1544,26 +1962,12 @@ $sufixo = ''
 if ($DryRun.IsPresent) { $sufixo += ' [DRY-RUN: nao envia o atalho]' }
 if ($NoSwallow.IsPresent) { $sufixo += ' [NoSwallow: o clique do meio tambem passa]' }
 
+$script:bandeja = $null
 try {
-    [MiddleClickRemap]::ConfigureScrollAccel(
-        (-not $NoScrollAccel.IsPresent),
-        $ScrollFastMs,
-        $ScrollRampNotches,
-        $ScrollMaxFactor,
-        $ScrollAccelInjected.IsPresent
-    )
+    [MiddleClickRemap]::Start($logPath, $DryRun.IsPresent, (-not $NoSwallow.IsPresent), $TriggerOn, $HoldMilliseconds)
+    Set-Funcoes -Config $config
 
-    [MiddleClickRemap]::Start(
-        $logPath,
-        $DryRun.IsPresent,
-        (-not $NoSwallow.IsPresent),
-        $OnlyProcess,
-        $TriggerOn,
-        $HoldMilliseconds
-    )
-
-    if ($teclasBotaoPequeno) {
-        [LogiSmallButton]::Start($SmallButtonCid, $teclasBotaoPequeno, $SmallButtonKeys, $DryRun.IsPresent)
+    if ([LogiSmallButton]::Running) {
         # Da' um instante para achar o mouse, so' para a mensagem abaixo sair certa.
         $limiteBusca = (Get-Date).AddSeconds(4)
         while ([LogiSmallButton]::Estado -eq 'procurando o mouse...' -and (Get-Date) -lt $limiteBusca) {
@@ -1571,56 +1975,95 @@ try {
         }
     }
 
+    $m = $config.MiddleClick; $r = $config.ScrollAccel; $b = $config.SmallButton
     Write-Host ''
-    Write-Host '  Remapeamento ativo: botao do meio do mouse -> CTRL+F4' -ForegroundColor Green
-    if ($teclasBotaoPequeno) {
-        Write-Host ('  Botao pequeno abaixo da roda (Logitech) -> ' + $SmallButtonKeys + ': ' + [LogiSmallButton]::Estado) -ForegroundColor Green
+    if ($m.Enabled) {
+        $escopo = if ($m.OnlyProcess) { "somente no programa '" + $m.OnlyProcess + "'" } else { 'em todos os programas' }
+        Write-Host ('  Botao do meio -> ' + $m.Keys + ' (' + $escopo + ')') -ForegroundColor Green
     }
-    else {
-        Write-Host '  Botao pequeno abaixo da roda: intocado (-NoSmallButton).' -ForegroundColor DarkGray
+    else { Write-Host '  Botao do meio: desligado (clique normal).' -ForegroundColor DarkGray }
+    if ($r.Enabled -and $r.MaxFactor -gt 1) {
+        Write-Host ('  Rolagem: aceleracao ate ' + $r.MaxFactor + 'x (degraus a ate ' + $r.FastMs + ' ms = giro continuo).') -ForegroundColor Green
     }
-    if ($OnlyProcess) {
-        Write-Host ("  Escopo: somente o processo '" + $OnlyProcess + "'") -ForegroundColor Green
-    }
-    else {
-        Write-Host '  Escopo: GLOBAL (todos os programas). Use -OnlyProcess <nome.exe> para restringir.' -ForegroundColor Green
-    }
-    if ($NoScrollAccel.IsPresent -or $ScrollMaxFactor -le 1) {
-        Write-Host '  Rolagem (roda): intocada, sem aceleracao.' -ForegroundColor DarkGray
-    }
-    else {
-        Write-Host ("  Rolagem (roda): aceleracao ativa (degraus a ate " + $ScrollFastMs + " ms = giro continuo; +1x a cada " +
-            $ScrollRampNotches + " degraus; maximo " + $ScrollMaxFactor + "x).") -ForegroundColor DarkGray
-    }
-    if ($logPath) {
-        Write-Host ("  Log: " + $logPath) -ForegroundColor DarkGray
-    }
-    if ($sufixo) {
-        Write-Host (" " + $sufixo) -ForegroundColor Yellow
-    }
+    else { Write-Host '  Rolagem: sem aceleracao.' -ForegroundColor DarkGray }
+    if ($b.Enabled) { Write-Host ('  Botao pequeno abaixo da roda -> ' + $b.Keys + ': ' + [LogiSmallButton]::Estado) -ForegroundColor Green }
+    else { Write-Host '  Botao pequeno abaixo da roda: desligado (Visao de Tarefas).' -ForegroundColor DarkGray }
+    if (-not $IgnoreConfig.IsPresent) { Write-Host ('  Configuracao: ' + $arquivoConfig) -ForegroundColor DarkGray }
+    if ($logPath) { Write-Host ('  Log: ' + $logPath) -ForegroundColor DarkGray }
+    if ($sufixo) { Write-Host (' ' + $sufixo) -ForegroundColor Yellow }
+    if ($usarBandeja) { Write-Host '  Icone na bandeja: clique para configurar, botao direito para pausar ou sair.' -ForegroundColor DarkGray }
     Write-Host '  Pare com Ctrl+C (ou com Parar-Remap.cmd se estiver rodando sem janela).' -ForegroundColor DarkGray
-    if ($MaxSeconds -gt 0) {
-        Write-Host ("  Encerra sozinho em " + $MaxSeconds + " segundos.") -ForegroundColor DarkGray
-    }
+    if ($MaxSeconds -gt 0) { Write-Host ('  Encerra sozinho em ' + $MaxSeconds + ' segundos.') -ForegroundColor DarkGray }
     Write-Host ''
 
-    # Fica vivo. A espera em fatias curtas responde ao Ctrl+C e ao pedido de parada
-    # do Parar-Remap.cmd; o finally abaixo desinstala o hook e devolve o botao pequeno.
     $limite = if ($MaxSeconds -gt 0) { (Get-Date).AddSeconds($MaxSeconds) } else { [datetime]::MaxValue }
-    while ((Get-Date) -lt $limite) {
-        if ($eventoParar.WaitOne(200)) {
-            Write-Host '  Parada pedida de fora: encerrando.' -ForegroundColor DarkGray
-            break
+
+    if ($usarBandeja) {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        [System.Windows.Forms.Application]::EnableVisualStyles()
+
+        $script:iconeAtivo = New-IconeMouse $true
+        $script:iconePausado = New-IconeMouse $false
+
+        $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        $itemConfig = New-Object System.Windows.Forms.ToolStripMenuItem 'Configurações...'
+        $itemConfig.Font = New-Object System.Drawing.Font($menu.Font, [System.Drawing.FontStyle]::Bold)
+        $script:itemPausar = New-Object System.Windows.Forms.ToolStripMenuItem 'Pausar'
+        $itemSair = New-Object System.Windows.Forms.ToolStripMenuItem 'Sair'
+        [void]$menu.Items.Add($itemConfig)
+        [void]$menu.Items.Add($script:itemPausar)
+        [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+        [void]$menu.Items.Add($itemSair)
+        $itemConfig.add_Click({ Show-Configuracoes })
+        $script:itemPausar.add_Click({ Switch-Pausa })
+        $itemSair.add_Click({ [void]$eventoParar.Set() })
+
+        $script:bandeja = New-Object System.Windows.Forms.NotifyIcon
+        $script:bandeja.ContextMenuStrip = $menu
+        $script:bandeja.add_MouseClick({
+            param($s, $e)
+            if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-Configuracoes }
+        })
+        Update-Bandeja
+        $script:bandeja.Visible = $true
+
+        # O loop de mensagens do WinForms fica com a thread principal; o relogio
+        # atende a parada (Sair, Ctrl+C, Parar-Remap.cmd, -MaxSeconds) e o pedido
+        # de abrir a janela vindo de uma segunda copia do script.
+        $relogioPrincipal = New-Object System.Windows.Forms.Timer
+        $relogioPrincipal.Interval = 250
+        $relogioPrincipal.add_Tick({
+            if ($eventoParar.WaitOne(0) -or (Get-Date) -ge $limite) {
+                $relogioPrincipal.Stop()
+                [System.Windows.Forms.Application]::ExitThread()
+            }
+            elseif ($eventoConfigurar.WaitOne(0)) {
+                Show-Configuracoes
+            }
+        })
+        $relogioPrincipal.Start()
+        [System.Windows.Forms.Application]::Run()
+    }
+    else {
+        # Sem bandeja (-NoTray, ou PowerShell 7 em MTA): espera em fatias curtas.
+        while ((Get-Date) -lt $limite) {
+            if ($eventoParar.WaitOne(200)) { break }
         }
     }
+
     if ($MaxSeconds -gt 0 -and (Get-Date) -ge $limite) {
         Write-Host '  Tempo esgotado: encerrando e desinstalando o hook.' -ForegroundColor DarkGray
     }
+    else {
+        Write-Host '  Parada pedida: encerrando.' -ForegroundColor DarkGray
+    }
 }
 finally {
+    if ($script:bandeja) { try { $script:bandeja.Visible = $false; $script:bandeja.Dispose() } catch { } }
     try { [LogiSmallButton]::Stop() } catch { }
     try { [MiddleClickRemap]::Stop() } catch { }
     try { $eventoParar.Dispose() } catch { }
+    try { $eventoConfigurar.Dispose() } catch { }
     try { $mutex.ReleaseMutex() } catch { }
     try { $mutex.Dispose() } catch { }
 }
